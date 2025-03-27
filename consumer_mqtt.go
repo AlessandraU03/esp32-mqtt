@@ -1,6 +1,8 @@
+// mqtt_to_rabbitmq.go
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -11,16 +13,17 @@ import (
 )
 
 func main() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatalf("Error cargando el archivo .env: %v", err)
+	// Cargar variables de entorno
+	if err := godotenv.Load(); err != nil {
+		log.Fatalf("Error cargando .env: %v", err)
 	}
 
 	mqttBroker := os.Getenv("MQTT_BROKER")
 	mqttUsername := os.Getenv("MQTT_USERNAME")
 	mqttPassword := os.Getenv("MQTT_PASSWORD")
 	amqpServer := os.Getenv("AMQP_SERVER")
-	amqpQueue := os.Getenv("AMQP_QUEUE")
+	exchangeName := "sensor_data"
+	topic := "esp32/sensores"
 
 	// Conectar a RabbitMQ
 	connRabbit, err := amqp.Dial(amqpServer)
@@ -35,11 +38,13 @@ func main() {
 	}
 	defer chRabbit.Close()
 
-	_, err = chRabbit.QueueDeclare(amqpQueue, false, false, false, false, nil)
+	// Declarar Exchange de tipo "direct"
+	err = chRabbit.ExchangeDeclare(exchangeName, "direct", true, false, false, false, nil)
 	if err != nil {
-		log.Fatalf("Error declarando la cola: %v", err)
+		log.Fatalf("Error declarando exchange: %v", err)
 	}
 
+	// Conectar a MQTT
 	opts := mqtt.NewClientOptions().AddBroker(mqttBroker)
 	opts.SetUsername(mqttUsername).SetPassword(mqttPassword)
 
@@ -50,20 +55,33 @@ func main() {
 
 	fmt.Println("Conectado a MQTT")
 
-	client.Subscribe("esp32/sensores", 0, func(client mqtt.Client, msg mqtt.Message) {
-		message := msg.Payload()
-		fmt.Println("📩 Mensaje recibido de MQTT:", string(message))
+	// Suscribirse al topic MQTT
+	client.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
+		var sensorData map[string]interface{}
+		if err := json.Unmarshal(msg.Payload(), &sensorData); err != nil {
+			log.Printf("Error al deserializar el mensaje: %v", err)
+			return
+		}
 
-		err = chRabbit.Publish("", amqpQueue, false, false, amqp.Publishing{
+		sensorType, ok := sensorData["sensor"].(string)
+		if !ok {
+			log.Println("Mensaje inválido, no contiene tipo de sensor")
+			return
+		}
+
+		message, _ := json.Marshal(sensorData)
+
+		// Publicar mensaje en el Exchange con la Routing Key correspondiente
+		err := chRabbit.Publish(exchangeName, sensorType, false, false, amqp.Publishing{
 			ContentType: "application/json",
 			Body:        message,
 		})
 		if err != nil {
 			log.Printf("Error enviando mensaje a RabbitMQ: %v", err)
 		} else {
-			fmt.Println("Mensaje enviado a RabbitMQ")
+			fmt.Printf("Mensaje enviado a RabbitMQ [%s]: %s\n", sensorType, message)
 		}
 	})
 
-	select {} // Mantener en ejecución
+	select {} // Mantener el proceso en ejecución
 }

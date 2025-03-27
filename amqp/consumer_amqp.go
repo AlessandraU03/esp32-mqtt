@@ -1,36 +1,59 @@
+// rabbitmq_consumer.go
 package main
 
 import (
 	"fmt"
 	"log"
+	"os"
 
-       amqp "github.com/rabbitmq/amqp091-go"
+	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/joho/godotenv"
 )
 
-const amqpQueue = "sensor_data"
-
 func main() {
+	// Cargar variables de entorno
+	if err := godotenv.Load(); err != nil {
+		log.Fatalf("Error cargando .env: %v", err)
+	}
+
+	amqpServer := os.Getenv("AMQP_SERVER")
+	exchangeName := "sensor_data"
+	queueName := "sensor_queue"
+	bindingKey := "temperatura" // Cambia según el tipo de sensor que quieras consumir
+
 	// Conectar a RabbitMQ
-	connRabbit, err := amqp.Dial("amqp://ale:ale05@54.156.170.232:5672/")
+	conn, err := amqp.Dial(amqpServer)
 	if err != nil {
 		log.Fatalf("Error conectando a RabbitMQ: %v", err)
 	}
-	defer connRabbit.Close()
+	defer conn.Close()
 
-	ch, err := connRabbit.Channel()
+	ch, err := conn.Channel()
 	if err != nil {
 		log.Fatalf("Error abriendo canal en RabbitMQ: %v", err)
 	}
 	defer ch.Close()
 
-	msgs, err := ch.Consume(amqpQueue, "", true, false, false, false, nil)
+	// Declarar la cola y enlazarla con la routing key correspondiente
+	q, err := ch.QueueDeclare(queueName, true, false, false, false, nil)
 	if err != nil {
-		log.Fatalf("Error consumiendo cola: %v", err)
+		log.Fatalf("Error declarando cola: %v", err)
 	}
 
-	fmt.Println("Esperando mensajes...")
+	err = ch.QueueBind(q.Name, bindingKey, exchangeName, false, nil)
+	if err != nil {
+		log.Fatalf("Error vinculando la cola: %v", err)
+	}
+
+	// Consumir mensajes
+	msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
+	if err != nil {
+		log.Fatalf("Error iniciando consumo: %v", err)
+	}
+
+	fmt.Printf("Esperando mensajes de tipo [%s]...\n", bindingKey)
 
 	for msg := range msgs {
-		fmt.Println("Recibido desde RabbitMQ:", string(msg.Body))
+		fmt.Printf("Mensaje recibido: %s\n", msg.Body)
 	}
 }
